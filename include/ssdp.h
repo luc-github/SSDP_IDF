@@ -80,9 +80,9 @@ typedef struct {
 
 esp_err_t ssdp_start(ssdp_config_t* configuration);
 
-esp_err_t ssdpd_stop();
+esp_err_t ssdp_stop();
 
-const char* ssdp_schema();
+const char* get_ssdp_schema_str();
 
 
 #ifdef __cplusplus
