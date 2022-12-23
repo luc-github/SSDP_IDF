@@ -35,20 +35,21 @@ typedef struct {
     uint32_t interval;
     uint8_t max_reply_slots;
     uint16_t mx_max_delay;
-    const char * uuid_root;
-    const char * device_type;
-    const char * friendly_name;
-    const char * serial_number;
-    const char * presentation_url;
-    const char * manufacturer_name;
-    const char * manufacturer_url;
-    const char * model_name;
-    const char * model_url;
-    const char * model_number;
-    const char * model_description;
-    const char * server_name;
-    const char * services_description;
-    const char * icons_description;
+    char * uuid_root;
+    char * uuid;
+    char * device_type;
+    char * friendly_name;
+    char * serial_number;
+    char * presentation_url;
+    char * manufacturer_name;
+    char * manufacturer_url;
+    char * model_name;
+    char * model_url;
+    char * model_number;
+    char * model_description;
+    char * server_name;
+    char * services_description;
+    char * icons_description;
 } ssdp_config_t;
 
 #define SDDP_DEFAULT_CONFIG() {                            \
@@ -61,6 +62,7 @@ typedef struct {
         .max_reply_slots     = 5,                          \
         .mx_max_delay        = 10000,                      \
         .uuid_root           = NULL,                       \
+        .uuid                =  NULL,                      \
         .device_type         = "Basic",                    \
         .friendly_name       = "ESP32",                    \
         .serial_number       = "000000",                   \
@@ -76,11 +78,11 @@ typedef struct {
         .icons_description    = NULL                       \
 }
 
-static esp_err_t ssdp_start(ssdp_config_t* configuration);
+esp_err_t ssdp_start(ssdp_config_t* configuration);
 
-static esp_err_t ssdpd_stop();
+esp_err_t ssdpd_stop();
 
-static const char* ssdp_schema();
+const char* ssdp_schema();
 
 
 #ifdef __cplusplus

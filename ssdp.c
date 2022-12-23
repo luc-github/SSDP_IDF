@@ -17,11 +17,12 @@
 #include <stdio.h>
 #include "ssdp.h"
 #include "esp_log.h"
-#include "esp_netif.h
+#include "esp_netif.h"
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
+#include "esp_mac.h"
 
 static const char *TAG = "esp-ssdp";
 
@@ -86,7 +87,7 @@ static const char SSDP_SCHEMA_TEMPLATE[]  =
     "<major>1</major>"
     "<minor>0</minor>"
     "</specVersion>"
-    "<URLBase>http://%u.%u.%u.%u:%u/</URLBase>" // LocalIP, port
+    "<URLBase>http://%s:%u/</URLBase>" // LocalIPStr, port
     "<device>"
     "<deviceType>urn:schemas-upnp-org:device:%s:1</deviceType>" // device_type
     "<friendlyName>%s</friendlyName>" // friendly_name
@@ -134,13 +135,12 @@ typedef struct {
     TaskHandle_t xHandle;
     //variables
     ssdp_reply_slot_item_t * replySlots;
+    char * schema;
 } ssdp_task_config_t;
 
 /*
 * Global variables
 */
-
-static = NULL;
 static ssdp_task_config_t * ssdp_task_config = NULL;
 
 
@@ -148,7 +148,7 @@ static ssdp_task_config_t * ssdp_task_config = NULL;
 * Prototypes
 */
 
-static void ssdp_set_UUID(const char *uuid);
+static  void ssdp_set_UUID(char **uuid, const char * root_uid);
 static void ssdp_running_task(void *pvParameters);
 static char * ssdp_get_LocalIP();
 
@@ -172,7 +172,7 @@ char * ssdp_get_LocalIP()
     }
     err = esp_netif_get_ip_info(netif, &ip_info);
     if (err != ESP_OK) {
-        ESP_LOGE(V4TAG, "Failed to get IP address info. Error 0x%x", err);
+        ESP_LOGE(TAG, "Failed to get IP address info. Error 0x%x", err);
         return "0.0.0.0";
     }
     return ip4addr_ntoa((const ip4_addr_t*) &ip_info.ip);
@@ -182,6 +182,10 @@ char * ssdp_get_LocalIP()
    multicast group */
 static int socket_add_ipv4_multicast_group(int sock, bool assign_source_if)
 {
+    if (!ssdp_task_config || !ssdp_task_config->config) {
+        ESP_LOGE(TAG, "SSDP is not started.");
+        return -1;
+    }
     struct ip_mreq imreq = { 0 };
     struct in_addr iaddr = { 0 };
     int err = 0;
@@ -226,13 +230,17 @@ err:
 
 static int create_multicast_ipv4_socket(void)
 {
+    if (!ssdp_task_config || !ssdp_task_config->config) {
+        ESP_LOGE(TAG, "SSDP is not started.");
+        return -1;
+    }
     struct sockaddr_in saddr = { 0 };
     int sock = -1;
     int err = 0;
 
     sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) {
-        ESP_LOGE(V4TAG, "Failed to create socket. Error %d", errno);
+        ESP_LOGE(TAG, "Failed to create socket. Error %d", errno);
         return -1;
     }
 
@@ -242,26 +250,26 @@ static int create_multicast_ipv4_socket(void)
     saddr.sin_addr.s_addr = htonl(INADDR_ANY);
     err = bind(sock, (struct sockaddr *)&saddr, sizeof(struct sockaddr_in));
     if (err < 0) {
-        ESP_LOGE(V4TAG, "Failed to bind socket. Error %d", errno);
+        ESP_LOGE(TAG, "Failed to bind socket. Error %d", errno);
         goto err;
     }
 
 
     // Assign multicast TTL (set separately from normal interface TTL)
-    uint8_t ttl = MULTICAST_TTL;
+    uint8_t ttl = ssdp_task_config->config->ttl;
     setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(uint8_t));
     if (err < 0) {
-        ESP_LOGE(V4TAG, "Failed to set IP_MULTICAST_TTL. Error %d", errno);
+        ESP_LOGE(TAG, "Failed to set IP_MULTICAST_TTL. Error %d", errno);
         goto err;
     }
 
     // select whether multicast traffic should be received by this device, too
     // (if setsockopt() is not called, the default is no)
-    uint8_t loopback_val = MULTICAST_LOOPBACK;
+    uint8_t loopback_val = 1;
     err = setsockopt(sock, IPPROTO_IP, IP_MULTICAST_LOOP,
                      &loopback_val, sizeof(uint8_t));
     if (err < 0) {
-        ESP_LOGE(V4TAG, "Failed to set IP_MULTICAST_LOOP. Error %d", errno);
+        ESP_LOGE(TAG, "Failed to set IP_MULTICAST_LOOP. Error %d", errno);
         goto err;
     }
 
@@ -284,6 +292,10 @@ err:
 
 void ssdp_running_task(void *pvParameters)
 {
+    //todo: implement them
+    (void) SSDP_PACKET_TEMPLATE;
+    (void) SSDP_NOTIFY_TEMPLATE;
+    (void) SSDP_RESPONSE_TEMPLATE;
     while (1) {
         int sock;
 
@@ -305,7 +317,7 @@ void ssdp_running_task(void *pvParameters)
             .sin_port = htons(SSDP_PORT),
         };
         // We know this inet_aton will pass because we did it above already
-        inet_aton(MULTICAST_IPV4_ADDR, &sdestv4.sin_addr.s_addr);
+        inet_aton(SSDP_MULTICAST_ADDR, &sdestv4.sin_addr.s_addr);
 
         // Loop waiting for UDP received, and sending UDP packets if we don't
         // see any.
@@ -407,20 +419,20 @@ void ssdp_running_task(void *pvParameters)
 
 }
 
-void ssdp_set_UUID(const char **uuid, const char * root_uid)
+void ssdp_set_UUID(char **uuid, const char * root_uid)
 {
     uint8_t mac[6];
-    esp_err_t err  = esp_efuse_read_field_blob(ESP_EFUSE_MAC_FACTORY, &mac, sizeof(mac) * 8);
+    esp_err_t err  = esp_efuse_mac_get_default((uint8_t *)&mac);
     if (ESP_OK != err) {
         memset(mac, 0, 6);
         ESP_LOGW(TAG, "Not able to read MAC address, use 000000");
     }
-    uint32_t chipId = ((uint16_t) ((uint64_t)mac)>>32);
+
     sprintf(*uuid, "%s%02x%02x%02x",
             root_uid,
-            (uint16_t) ((chipId >> 16) & 0xff),
-            (uint16_t) ((chipId >>  8) & 0xff),
-            (uint16_t)   chipId        & 0xff  );
+            mac[2],
+            mac[1],
+            mac[0] );
 
 }
 
@@ -429,7 +441,6 @@ void ssdp_set_UUID(const char **uuid, const char * root_uid)
 */
 esp_err_t ssdp_start(ssdp_config_t* configuration)
 {
-    esp_err_t ret = ESP_OK;
     if (! configuration) {
         ESP_LOGE(TAG, "Missing configuration parameter");
         return ESP_ERR_INVALID_ARG;
@@ -477,15 +488,27 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
-    if (!configuration->uuid_root || strlen(configuration->uuid_root)==)0 {
+    //Nothing is configured use default root and mac
+    if ((!configuration->uuid_root || strlen(configuration->uuid_root)==0) && (!configuration->uuid || strlen(configuration->uuid)==0)) {
         ssdp_set_UUID(&ssdp_task_config->config->uuid,SSDP_UUID_ROOT);
     } else {
-        if (strlen(configuration->uuid_root)==strlen(SSDP_UUID_ROOT)) {
-            ssdp_set_UUID(&ssdp_task_config->config->uuid,configuration->uuid_root);
+        //if no full UID is configured but has root
+        if ((!configuration->uuid || strlen(configuration->uuid)==0)) {
+            if (strlen(configuration->uuid_root)==strlen(SSDP_UUID_ROOT)) {
+                ssdp_set_UUID(&ssdp_task_config->config->uuid,configuration->uuid_root);
+            } else {
+                ESP_LOGE(TAG, "Wrong size of uuid root parameter");
+                return ESP_ERR_INVALID_ARG;
+            }
         } else {
-            ESP_LOGE(TAG, "Wrong size of uuid root parameter");
-            return ESP_ERR_INVALID_ARG;
+            if (strlen(configuration->uuid)==SSDP_UUID_SIZE) {
+                strcpy(ssdp_task_config->config->uuid, configuration->uuid);
+            } else {
+                ESP_LOGE(TAG, "Invalid uuid parameter");
+                return ESP_ERR_INVALID_ARG;
+            }
         }
+
     }
     //Device type
     if (strlen(configuration->device_type)>SSDP_DEVICE_TYPE_SIZE) {
@@ -493,7 +516,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->device_type = (char *) malloc(strlen(configuration->device_type)+1);
-    if (!ssdp_ssdp_task_config->config->device_type ) {
+    if (!ssdp_task_config->config->device_type ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -505,7 +528,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->friendly_name = (char *) malloc(strlen(configuration->friendly_name)+1);
-    if (!ssdp_ssdp_task_config->config->friendly_name ) {
+    if (!ssdp_task_config->config->friendly_name ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -517,7 +540,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->serial_number = (char *) malloc(strlen(configuration->serial_number)+1);
-    if (!ssdp_ssdp_task_config->config->serial_number ) {
+    if (!ssdp_task_config->config->serial_number ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -529,7 +552,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->presentation_url = (char *) malloc(strlen(configuration->presentation_url)+1);
-    if (!ssdp_ssdp_task_config->config->presentation_url ) {
+    if (!ssdp_task_config->config->presentation_url ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -541,7 +564,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->manufacturer_name = (char *) malloc(strlen(configuration->manufacturer_name)+1);
-    if (!ssdp_ssdp_task_config->config->manufacturer_name ) {
+    if (!ssdp_task_config->config->manufacturer_name ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -553,7 +576,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->manufacturer_url = (char *) malloc(strlen(configuration->manufacturer_url)+1);
-    if (!ssdp_ssdp_task_config->config->manufacturer_url ) {
+    if (!ssdp_task_config->config->manufacturer_url ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -565,7 +588,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->model_name = (char *) malloc(strlen(configuration->model_name)+1);
-    if (!ssdp_ssdp_task_config->config->model_name ) {
+    if (!ssdp_task_config->config->model_name ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -577,7 +600,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->model_url = (char *) malloc(strlen(configuration->model_url)+1);
-    if (!ssdp_ssdp_task_config->config->model_url ) {
+    if (!ssdp_task_config->config->model_url ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -589,7 +612,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->model_number = (char *) malloc(strlen(configuration->model_number)+1);
-    if (!ssdp_ssdp_task_config->config->model_number ) {
+    if (!ssdp_task_config->config->model_number ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -601,7 +624,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->model_description = (char *) malloc(strlen(configuration->model_description)+1);
-    if (!ssdp_ssdp_task_config->config->model_description ) {
+    if (!ssdp_task_config->config->model_description ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -613,11 +636,11 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->server_name = (char *) malloc(strlen(configuration->server_name)+1);
-    if (!ssdp_ssdp_task_config->config->server_name ) {
+    if (!ssdp_task_config->config->server_name ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
-    strcpy(ssdp_task_config->config->_servername, configuration->_servername);
+    strcpy(ssdp_task_config->config->server_name, configuration->server_name);
 
 
     //Services description
@@ -626,7 +649,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->services_description = (char *) malloc(strlen(configuration->services_description)+1);
-    if (!ssdp_ssdp_task_config->config->services_description ) {
+    if (!ssdp_task_config->config->services_description ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -639,7 +662,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
         return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->config->icons_description = (char *) malloc(strlen(configuration->icons_description)+1);
-    if (!ssdp_ssdp_task_config->config->icons_description ) {
+    if (!ssdp_task_config->config->icons_description ) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
@@ -647,7 +670,7 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
 
     //Task creation
     BaseType_t  res =  xTaskCreatePinnedToCore(ssdp_running_task, "ssdp_running_task", configuration->stack_size, NULL, configuration->task_priority, &ssdp_task_config->xHandle, configuration->core_id);
-    if (!(res==pdPASS && xHandle)) {
+    if (!(res==pdPASS && ssdp_task_config->xHandle)) {
         ESP_LOGE(TAG, "Failed to create task");
         return ESP_FAIL;
     }
@@ -679,9 +702,10 @@ esp_err_t ssdpd_stop()
             free(ssdp_task_config->config->server_name );
             free(ssdp_task_config->config->services_description);
             free(ssdp_task_config->config->icons_description);
-            free(ssdp_task_config->ssdp_config);
+            free(ssdp_task_config->config);
         }
         free(ssdp_task_config->replySlots);
+        free(ssdp_task_config->schema);
         free(ssdp_task_config);
         ssdp_task_config = NULL;
     }
@@ -690,5 +714,48 @@ esp_err_t ssdpd_stop()
 
 const char* ssdp_schema()
 {
-    return NULL;
+    if (!ssdp_task_config) {
+        return NULL;
+    }
+    if (ssdp_task_config->schema) {
+        free(ssdp_task_config->schema);
+    }
+
+    size_t template_size = sizeof(SSDP_SCHEMA_TEMPLATE)
+                           + 15 //IP
+                           + 5  //port
+                           + strlen(ssdp_task_config->config->device_type)
+                           + strlen(ssdp_task_config->config->friendly_name)
+                           + strlen(ssdp_task_config->config->presentation_url)
+                           + strlen(ssdp_task_config->config->serial_number)
+                           + strlen(ssdp_task_config->config->model_name)
+                           + strlen(ssdp_task_config->config->model_description)
+                           + strlen(ssdp_task_config->config->model_number)
+                           + strlen(ssdp_task_config->config->model_url)
+                           + strlen(ssdp_task_config->config->manufacturer_name)
+                           + strlen(ssdp_task_config->config->manufacturer_url)
+                           + strlen(ssdp_task_config->config->uuid)
+                           + strlen(ssdp_task_config->config->services_description)
+                           + strlen(ssdp_task_config->config->icons_description);
+    ssdp_task_config->schema = (char *) malloc(template_size+1);
+    if (ssdp_task_config->schema) {
+        sprintf(ssdp_task_config->schema,ssdp_get_LocalIP(),
+                ssdp_task_config->config->port,
+                ssdp_task_config->config->device_type,
+                ssdp_task_config->config->friendly_name,
+                ssdp_task_config->config->presentation_url,
+                ssdp_task_config->config->serial_number,
+                ssdp_task_config->config->model_name,
+                ssdp_task_config->config->model_description,
+                ssdp_task_config->config->model_number,
+                ssdp_task_config->config->model_url,
+                ssdp_task_config->config->manufacturer_name,
+                ssdp_task_config->config->manufacturer_url,
+                ssdp_task_config->config->uuid,
+                ssdp_task_config->config->services_description,
+                ssdp_task_config->config->icons_description);
+    } else {
+        ESP_LOGE(TAG, "Memory allocation error for schema");
+    }
+    return ssdp_task_config->schema;
 }
