@@ -16,6 +16,7 @@
 */
 #include <stdio.h>
 #include "ssdp.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "lwip/err.h"
@@ -35,8 +36,9 @@ static const char *TAG = "esp-ssdp";
 #define SSDP_URI_SIZE     2
 #define SSDP_BUFFER_SIZE  64
 #define SSDP_MULTICAST_TTL 2
-#define SSDP_UUID_ROOT "38323636-4558-4dda-9188-cda0e6"
+#define SSDP_UUID_ROOT "38323636-4558-4dda-9188"
 #define SSDP_MULTICAST_ADDR "239.255.255.250"
+#define SSDP_MAX_DELAY              10000
 
 /*
 * Sizes
@@ -57,6 +59,7 @@ static const char *TAG = "esp-ssdp";
 #define SSDP_MANUFACTURER_URL_SIZE  128
 #define SSDP_SERVICES_DESCRIPTION_SIZE  256
 #define SSDP_ICONS_DESCRIPTION_SIZE  256
+#define SSDP_DATAGRAM_SIZE          1401
 
 /*
 * Templates messages
@@ -72,12 +75,12 @@ static const char SSDP_NOTIFY_TEMPLATE[]  =
     "NTS: ssdp:alive\r\n";
 
 static const char SSDP_PACKET_TEMPLATE[]  =
-    "%s" //resonse or notify
-    "CACHE-CONTROL: max-age=%u\r\n" // expire time
+    "%s" //Message Notification or Response
+    "CACHE-CONTROL: max-age=%u\r\n"
     "SERVER: %s UPNP/1.1 %s/%s\r\n" // server_name, model_name, model_number
     "USN: uuid:%s%s\r\n" // uuid, usn_suffix
     "%s: %s\r\n"  // "NT" or "ST", device_type
-    "LOCATION: http://%u.%u.%u.%u:%u/%s\r\n" //LocalIP, port, schemaURL
+    "LOCATION: http://%s:%u/%s\r\n" //LocalIP, port, schemaURL
     "\r\n";
 
 static const char SSDP_SCHEMA_TEMPLATE[]  =
@@ -121,21 +124,18 @@ typedef enum {
 */
 
 typedef struct {
-    unsigned long process_time;
-    int delay;
-    //IPAddress _respondToAddr;
-    uint16_t respondToPort;
-    char respondType[SSDP_DEVICE_TYPE_SIZE];
-    char usn_suffix[SSDP_USN_SUFFIX_SIZE];
-} ssdp_reply_slot_item_t;
-
-typedef struct {
     ssdp_config_t * config;
     //Task handle
     TaskHandle_t xHandle;
     //variables
-    ssdp_reply_slot_item_t * replySlots;
+    char * datagram_buffer;
+    char respond_type[SSDP_DEVICE_TYPE_SIZE+1];
+    char usn_suffix[SSDP_USN_SUFFIX_SIZE+1];
     char * schema;
+    //TODO: Check usage now we use full datagram at once
+    int delay;
+    uint64_t process_time;
+    uint64_t  notify_time;
 } ssdp_task_config_t;
 
 /*
@@ -151,10 +151,26 @@ static ssdp_task_config_t * ssdp_task_config = NULL;
 static  void ssdp_set_UUID(char **uuid, const char * root_uid);
 static void ssdp_running_task(void *pvParameters);
 static char * ssdp_get_LocalIP();
+static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char * buf, int len);
+static void ssdp_send (int sock, ssdp_method_t method, in_addr_t remote_addr, uint16_t remote_port);
+static uint64_t ssdp_millis();
+static int ssdp_random( int lowval, int highval);
+
 
 /*
 * Local Functions
 */
+
+int ssdp_random( int lowval, int highval)
+{
+    srand ( esp_timer_get_time()/1000);
+    return lowval + rand() % (highval - lowval + 1);
+}
+
+uint64_t ssdp_millis()
+{
+    return esp_timer_get_time()/1000;
+}
 
 char * ssdp_get_LocalIP()
 {
@@ -226,8 +242,6 @@ err:
     return err;
 }
 
-
-
 static int create_multicast_ipv4_socket(void)
 {
     if (!ssdp_task_config || !ssdp_task_config->config) {
@@ -237,7 +251,7 @@ static int create_multicast_ipv4_socket(void)
     struct sockaddr_in saddr = { 0 };
     int sock = -1;
     int err = 0;
-
+    //Receive full datagram at once in
     sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) {
         ESP_LOGE(TAG, "Failed to create socket. Error %d", errno);
@@ -256,8 +270,7 @@ static int create_multicast_ipv4_socket(void)
 
 
     // Assign multicast TTL (set separately from normal interface TTL)
-    uint8_t ttl = ssdp_task_config->config->ttl;
-    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(uint8_t));
+    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ssdp_task_config->config->ttl, sizeof(uint8_t));
     if (err < 0) {
         ESP_LOGE(TAG, "Failed to set IP_MULTICAST_TTL. Error %d", errno);
         goto err;
@@ -290,23 +303,287 @@ err:
 
 
 
+static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char * buf, int len)
+{
+    ESP_LOGI(TAG, "received %d bytes from %s:%d", len, ip4addr_ntoa((const ip4_addr_t*)&remote_addr),remote_port );
+    ESP_LOGI(TAG, "%s", buf);
+
+    if (len== 0) {
+        return;
+    }
+    ssdp_method_t method = NONE;
+    typedef enum {METHOD, URI, PROTO, KEY, VALUE, ABORT} states;
+    states state = METHOD;
+    typedef enum {START, MAN, ST, MX} headers;
+    headers header = START;
+    bool pending = false;
+    bool stmatch = false;
+    uint8_t cursor = 0;
+    uint8_t cr = 0;
+
+    char buffer[SSDP_BUFFER_SIZE] = {0};
+
+    for(uint i = 0; i < len; i++) {
+        char c = buf[i];
+
+        if(c == '\r' || c == '\n') {
+            cr++ ;
+        } else {
+            cr = 0;
+        }
+
+        switch (state) {
+        case METHOD:
+            if (c == ' ') {
+                if (strcmp(buffer, "M-SEARCH") == 0) {
+                    method = SEARCH;
+                }
+
+                if (method == NONE) {
+                    state = ABORT;
+                } else {
+                    state = URI;
+                }
+                cursor = 0;
+
+            } else if (cursor < SSDP_METHOD_SIZE - 1) {
+                buffer[cursor++] = c;
+                buffer[cursor] = '\0';
+            }
+            break;
+        case URI:
+            if (c == ' ') {
+                if (strcmp(buffer, "*")) {
+                    state = ABORT;
+                } else {
+                    state = PROTO;
+                }
+                cursor = 0;
+            } else if (cursor < SSDP_URI_SIZE - 1) {
+                buffer[cursor++] = c;
+                buffer[cursor] = '\0';
+            }
+            break;
+        case PROTO:
+            if (cr == 2) {
+                state = KEY;
+                cursor = 0;
+            }
+            break;
+        case KEY:
+            if (cr == 4) {
+                if (stmatch) {
+                    pending = true;
+                    ssdp_task_config->process_time = ssdp_millis();
+                }
+            } else if (c == ':') {
+                cursor = 0;
+                state = VALUE;
+            } else if (c != '\r' && c != '\n' && c != ' ' && cursor < SSDP_BUFFER_SIZE - 1) {
+                buffer[cursor++] = c;
+                buffer[cursor] = '\0';
+            }
+            break;
+        case VALUE:
+            if (cr == 2) {
+                switch (header) {
+                case START:
+                    ESP_LOGI(TAG,"***********************\n");
+                    break;
+                case MAN:
+                    ESP_LOGI(TAG,"MAN: %s\n", (char *)buffer);
+                    break;
+                case ST:
+                    // save the search term for the reply and clear usn suffix.
+                    strlcpy(ssdp_task_config->respond_type, buffer, sizeof(ssdp_task_config->respond_type));
+                    ssdp_task_config->usn_suffix[0] = '\0';
+
+                    ESP_LOGI(TAG,"ST: '%s'\n",buffer);
+
+                    // if looking for all or root reply with upnp:rootdevice
+                    if(strcmp(buffer, "ssdp:all")==0 || strcmp(buffer, "upnp:rootdevice")==0) {
+                        stmatch = true;
+                        // set USN suffix
+                        strlcpy(ssdp_task_config->usn_suffix, "::upnp:rootdevice", sizeof(ssdp_task_config->usn_suffix));
+                        ESP_LOGI(TAG,"the search type matches all and root\n");
+                        state = KEY;
+                    } else {
+                        // if the search type matches our type, we should respond instead of ABORT
+                        if(strcasecmp(buffer, ssdp_task_config->config->device_type) == 0) {
+                            stmatch = true;
+                            // set USN suffix to the device type
+                            strlcpy(ssdp_task_config->usn_suffix, "::", sizeof(ssdp_task_config->usn_suffix));
+                            strlcat(ssdp_task_config->usn_suffix, ssdp_task_config->config->device_type, sizeof(ssdp_task_config->usn_suffix));
+                            ESP_LOGI(TAG,"the search type matches our type %s\n");
+                            state = KEY;
+                        } else {
+                            state = ABORT;
+                            ESP_LOGI(TAG,"REJECT. The search type %s does not match our type %s\n", buffer, ssdp_task_config->config->device_type);
+                            ESP_LOGI(TAG,"***********************\n");
+                        }
+                    }
+                    break;
+                case MX:
+                    ssdp_task_config->delay = ssdp_random(0, atoi(buffer)) * 1000L;
+                    if (ssdp_task_config->delay > SSDP_MAX_DELAY) {
+                        ssdp_task_config->delay = SSDP_MAX_DELAY;
+                    }
+                    break;
+                }
+
+                if (state != ABORT) {
+                    state = KEY;
+                    header = START;
+                    cursor = 0;
+                }
+            } else if (c != '\r' && c != '\n') {
+                if (header == START) {
+                    if (strncmp(buffer, "MA", 2) == 0) {
+                        header = MAN;
+                    } else if (strcmp(buffer, "ST") == 0) {
+                        header = ST;
+                    } else if (strcmp(buffer, "MX") == 0) {
+                        header = MX;
+                    }
+                }
+
+                if (cursor < SSDP_BUFFER_SIZE - 1) {
+                    buffer[cursor++] = c;
+                    buffer[cursor] = '\0';
+                }
+            }
+            break;
+        case ABORT:
+            pending = false;
+            ssdp_task_config->delay = 0;
+            break;
+        }
+    }
+
+
+    if (pending && (ssdp_millis() - ssdp_task_config->process_time) > ssdp_task_config->delay) {
+        pending = false;
+        ssdp_task_config->delay = 0;
+        ssdp_send(sock, NONE, remote_addr, remote_port);
+    } else if(ssdp_task_config->notify_time == 0 || (ssdp_millis() - ssdp_task_config->notify_time) > (ssdp_task_config->config->interval * 1000L)) {
+        ssdp_task_config->notify_time = ssdp_millis();
+        ssdp_send(sock, NOTIFY,remote_addr,remote_port);
+    }
+
+
+
+}
+
+void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t remote_port)
+{
+    if(method == NONE) {
+        ESP_LOGI(TAG,"Sending Response to %s:%d", ip4addr_ntoa((const ip4_addr_t*)&remote_addr),remote_port);
+
+    } else {
+        ip_addr_t tmpip ;
+        tmpip.type = IPADDR_TYPE_V4;
+        //convert string to ip_addr_t
+        ip4addr_aton(SSDP_MULTICAST_ADDR, &tmpip.u_addr.ip4);
+        remote_addr  =  ip4_addr_get_u32(&tmpip.u_addr.ip4);
+        remote_port = SSDP_PORT;
+        // send notify with our root device type
+        strlcpy(ssdp_task_config->respond_type, "upnp:rootdevice", sizeof(ssdp_task_config->respond_type));
+        strlcpy(ssdp_task_config->usn_suffix, "::upnp:rootdevice", sizeof(ssdp_task_config->usn_suffix));
+        ESP_LOGI(TAG,"Sending Notify to %s:%d",SSDP_MULTICAST_ADDR,SSDP_PORT);
+    }
+    size_t len_msg_template =  (method == NONE)?strlen(SSDP_RESPONSE_TEMPLATE):strlen (SSDP_NOTIFY_TEMPLATE);
+    size_t msg_buffer_size = strlen(SSDP_PACKET_TEMPLATE)
+                             + len_msg_template
+                             + 5
+                             + (ssdp_task_config->config->server_name?strlen(ssdp_task_config->config->server_name):1)
+                             + (ssdp_task_config->config->model_name?strlen(ssdp_task_config->config->model_name):1)
+                             + (ssdp_task_config->config->model_number?strlen(ssdp_task_config->config->model_number):1)
+                             + (SSDP_UUID_SIZE)
+                             + (SSDP_USN_SUFFIX_SIZE)
+                             + 2 // "NT" or "ST"
+                             + (ssdp_task_config->respond_type?strlen(ssdp_task_config->respond_type):1)
+                             + 16
+                             + 5
+                             + (ssdp_task_config->config->schema_url?strlen(ssdp_task_config->config->schema_url):1);
+    char * msg_buffer =  (char *)malloc(msg_buffer_size+1);
+
+    if (!msg_buffer) {
+        ESP_LOGE(TAG,"Error not enough memory for valueBuffer creation");
+        return;
+    }
+
+    int result = snprintf(msg_buffer,
+                          msg_buffer_size,
+                          SSDP_PACKET_TEMPLATE,
+                          ((method == NONE)?SSDP_RESPONSE_TEMPLATE:SSDP_NOTIFY_TEMPLATE),
+                          ssdp_task_config->config->interval,
+                          ssdp_task_config->config->server_name?ssdp_task_config->config->server_name:"",
+                          ssdp_task_config->config->model_name?ssdp_task_config->config->model_name:"",
+                          ssdp_task_config->config->model_number?ssdp_task_config->config->model_number:"",
+                          ssdp_task_config->config->uuid?ssdp_task_config->config->uuid:"",
+                          ssdp_task_config->usn_suffix?ssdp_task_config->usn_suffix:"",
+                          (method == NONE)?"ST":"NT",
+                          ssdp_task_config->respond_type?ssdp_task_config->respond_type:"",
+                          ssdp_get_LocalIP(),
+                          ssdp_task_config->config->port,
+                          ssdp_task_config->config->schema_url?ssdp_task_config->config->schema_url:""
+                         );
+    ESP_LOGI(TAG, "sprintf result: %d", result);
+    if (result < 0) {
+        ESP_LOGE(TAG,"Error not enough memory for msg_buffer creation");
+    }
+
+    ESP_LOGI(TAG,"*************************TX*************************");
+    ESP_LOGI(TAG,"%s",msg_buffer);
+    ESP_LOGI(TAG,"****************************************************");
+
+    struct addrinfo hints = {
+        .ai_flags = AI_PASSIVE,
+        .ai_socktype = SOCK_DGRAM,
+    };
+    struct addrinfo *res;
+
+    hints.ai_family = AF_INET; // For an IPv4 socket
+
+    int err = getaddrinfo(ip4addr_ntoa((const ip4_addr_t*)&remote_addr),
+                          NULL,
+                          &hints,
+                          &res);
+    if (res == 0 ||err < 0) {
+        if  (err < 0) {
+            ESP_LOGE(TAG, "getaddrinfo() failed for IPV4 destination address. error: %d", err);
+        } else {
+            ESP_LOGE(TAG, "getaddrinfo() did not return any addresses");
+        }
+        free(msg_buffer);
+        return;
+    }
+    ((struct sockaddr_in *)res->ai_addr)->sin_port = remote_port;
+
+    ESP_LOGI(TAG, "Sending to IPV4 multicast address %s:%d...",  ip4addr_ntoa((const ip4_addr_t*)&remote_addr), remote_port);
+
+    err = sendto(sock, msg_buffer, strlen(msg_buffer), 0, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (err < 0) {
+        ESP_LOGE(TAG, "IPV4 sendto failed. errno: %d", errno);
+    } else {
+
+    }
+
+    free(msg_buffer);
+}
+
+
 void ssdp_running_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Starting ssdp_running_task");
-
-    //todo: implement them
-    (void) SSDP_PACKET_TEMPLATE;
-    (void) SSDP_NOTIFY_TEMPLATE;
-    (void) SSDP_RESPONSE_TEMPLATE;
+    bool notifyDone = false;
     while (1) {
         int sock;
-
         sock = create_multicast_ipv4_socket();
         if (sock < 0) {
             ESP_LOGE(TAG, "Failed to create IPv4 multicast socket");
         }
-
-
         if (sock < 0) {
             // Nothing to do!
             vTaskDelay(5 / portTICK_PERIOD_MS);
@@ -319,8 +596,7 @@ void ssdp_running_task(void *pvParameters)
             .sin_port = htons(SSDP_PORT),
         };
         // We know this inet_aton will pass because we did it above already
-        inet_aton(SSDP_MULTICAST_ADDR, &sdestv4.sin_addr.s_addr);
-
+        inet_aton(SSDP_MULTICAST_ADDR, &sdestv4.sin_addr.s_addr); //s_addr = u32
         // Loop waiting for UDP received, and sending UDP packets if we don't
         // see any.
         int err = 1;
@@ -341,79 +617,31 @@ void ssdp_running_task(void *pvParameters)
             } else if (s > 0) {
                 if (FD_ISSET(sock, &rfds)) {
                     // Incoming datagram received
-                    char recvbuf[48];
-                    char raddr_name[32] = { 0 };
-
-                    struct sockaddr_storage raddr; // Large enough for both IPv4
+                    struct sockaddr_storage raddr;
                     socklen_t socklen = sizeof(raddr);
-                    int len = recvfrom(sock, recvbuf, sizeof(recvbuf)-1, 0,
+                    //Read all the datagram at once, if over buffer the data will be discarded
+                    int len = recvfrom(sock,ssdp_task_config->datagram_buffer, SSDP_DATAGRAM_SIZE-1, 0,
                                        (struct sockaddr *)&raddr, &socklen);
                     if (len < 0) {
                         ESP_LOGE(TAG, "multicast recvfrom failed: errno %d", errno);
                         err = -1;
                         break;
                     }
-
-                    // Get the sender's address as a string
-
                     if (raddr.ss_family == PF_INET) {
-                        inet_ntoa_r(((struct sockaddr_in *)&raddr)->sin_addr,
-                                    raddr_name, sizeof(raddr_name)-1);
+                        ssdp_task_config->datagram_buffer[len] = 0; // Null-terminate whatever we received and treat like a string...
+                        uint16_t remote_port =  ((struct sockaddr_in *)&raddr)->sin_port;
+                        in_addr_t remote_addr =((struct sockaddr_in *)&raddr)->sin_addr.s_addr;
+                        onPacket(sock, remote_addr, remote_port, ssdp_task_config->datagram_buffer, len) ;
                     }
 
-                    ESP_LOGI(TAG, "received %d bytes from %s:", len, raddr_name);
-
-                    recvbuf[len] = 0; // Null-terminate whatever we received and treat like a string...
-                    ESP_LOGI(TAG, "%s", recvbuf);
                 }
-            } else { // s == 0
-                // Timeout passed with no incoming data, so send something!
-                static int send_count;
-                const char sendfmt[] = "Multicast #%d sent by ESP32\n";
-                char sendbuf[48];
-                char addrbuf[32] = { 0 };
-                int len = snprintf(sendbuf, sizeof(sendbuf), sendfmt, send_count++);
-                if (len > sizeof(sendbuf)) {
-                    ESP_LOGE(TAG, "Overflowed multicast sendfmt buffer!!");
-                    send_count = 0;
-                    err = -1;
-                    break;
+            } else {
+                if (!notifyDone) {
+                    notifyDone = true;
+                    ssdp_send(sock,NOTIFY,0,0);
                 }
-
-                struct addrinfo hints = {
-                    .ai_flags = AI_PASSIVE,
-                    .ai_socktype = SOCK_DGRAM,
-                };
-                struct addrinfo *res;
-
-                hints.ai_family = AF_INET; // For an IPv4 socket
-
-                int err = getaddrinfo(SSDP_MULTICAST_ADDR,
-                                      NULL,
-                                      &hints,
-                                      &res);
-                if (err < 0) {
-                    ESP_LOGE(TAG, "getaddrinfo() failed for IPV4 destination address. error: %d", err);
-                    break;
-                }
-                if (res == 0) {
-                    ESP_LOGE(TAG, "getaddrinfo() did not return any addresses");
-                    break;
-                }
-                ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(SSDP_PORT);
-                inet_ntoa_r(((struct sockaddr_in *)res->ai_addr)->sin_addr, addrbuf, sizeof(addrbuf)-1);
-                ESP_LOGI(TAG, "Sending to IPV4 multicast address %s:%d...",  addrbuf, SSDP_PORT);
-
-                err = sendto(sock, sendbuf, len, 0, res->ai_addr, res->ai_addrlen);
-                freeaddrinfo(res);
-                if (err < 0) {
-                    ESP_LOGE(TAG, "IPV4 sendto failed. errno: %d", errno);
-                    break;
-                }
-
             }
         }
-
         ESP_LOGE(TAG, "Shutting down socket and restarting...");
         shutdown(sock, 0);
         close(sock);
@@ -435,7 +663,6 @@ void ssdp_set_UUID(char **uuid, const char * root_uid)
             mac[2],
             mac[1],
             mac[0] );
-
 }
 
 /*
@@ -468,20 +695,24 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
     }
     //Init to 0 everywhere
     memset(ssdp_task_config->config, 0, sizeof(ssdp_config_t));
+
+    //Buffer for udp packet
+    ssdp_task_config->datagram_buffer = (char *)malloc(SSDP_DATAGRAM_SIZE);
+    if (!ssdp_task_config->datagram_buffer) {
+        ESP_LOGE(TAG, "No enough memory for ssdp datagram buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    //Init to 0 everywhere
+    memset(ssdp_task_config->datagram_buffer, 0, SSDP_DATAGRAM_SIZE);
+
+    //Task configuration
     ssdp_task_config->config->task_priority = configuration->task_priority;
     ssdp_task_config->config->stack_size = configuration->stack_size;
     ssdp_task_config->config->core_id = configuration->core_id;
     ssdp_task_config->config->port = configuration->port;
     ssdp_task_config->config->ttl = configuration->ttl;
     ssdp_task_config->config->interval = configuration->interval;
-    ssdp_task_config->config->max_reply_slots = configuration->max_reply_slots;
-
-    //Reply slots
-    ssdp_task_config->replySlots = (ssdp_reply_slot_item_t *)malloc(sizeof(ssdp_reply_slot_item_t) *  configuration->max_reply_slots);
-    if (!ssdp_task_config->replySlots) {
-        ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
-        return ESP_ERR_NO_MEM;
-    }
     ssdp_task_config->config->mx_max_delay = configuration->mx_max_delay;
 
     //UUID
@@ -511,6 +742,20 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
                 return ESP_ERR_INVALID_ARG;
             }
         }
+    }
+
+    //Schema_ url
+    if (configuration->schema_url) {
+        if (strlen(configuration->schema_url)>SSDP_SCHEMA_URL_SIZE) {
+            ESP_LOGE(TAG, "schema_url too long");
+            return ESP_ERR_INVALID_ARG;
+        }
+        ssdp_task_config->config->schema_url = (char *) malloc(strlen(configuration->schema_url)+1);
+        if (!ssdp_task_config->config->schema_url ) {
+            ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
+            return ESP_ERR_NO_MEM;
+        }
+        strcpy(ssdp_task_config->config->schema_url, configuration->schema_url);
     }
 
     //Device type
@@ -732,7 +977,7 @@ esp_err_t ssdp_stop()
             free(ssdp_task_config->config->icons_description);
             free(ssdp_task_config->config);
         }
-        free(ssdp_task_config->replySlots);
+        free(ssdp_task_config->datagram_buffer);
         free(ssdp_task_config->schema);
         free(ssdp_task_config);
         ssdp_task_config = NULL;

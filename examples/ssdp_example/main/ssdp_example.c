@@ -64,8 +64,40 @@ static httpd_handle_t start_webserver(void)
         ESP_LOGI(TAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &hello);
         httpd_register_uri_handler(server, &ssdp_schema);
-        ESP_LOGI(TAG, "Starting ssdp service");
+
+        /*
+        #define SDDP_DEFAULT_CONFIG() {                    \
+        .task_priority       = tskIDLE_PRIORITY+5,         \
+        .stack_size          = 4096,                       \
+        .core_id             = tskNO_AFFINITY,             \
+        .port                = 80,                         \
+        .ttl                 = 2,                          \
+        .interval            = 1200,                       \
+        .mx_max_delay        = 10000,                      \
+        .uuid_root           = NULL,                       \
+        .uuid                =  NULL,                      \
+        .schema_url          = "description.xml",          \
+        .device_type         = "Basic",                    \
+        .friendly_name       = "ESP32",                    \
+        .serial_number       = "000000",                   \
+        .presentation_url    = "/",                        \
+        .manufacturer_name   = "Espressif Systems",        \
+        .manufacturer_url    = "https://www.espressif.com",\
+        .model_name          = "ESP32",                    \
+        .model_url           = "https://www.espressif.com",\
+        .model_number         = "12345",                   \
+        .model_description    = NULL,                      \
+        .server_name          = "SSDPServer-IDF/1.0",           \
+        .services_description = NULL,                      \
+        .icons_description    = NULL                       \
+        }
+        */
         ssdp_config_t config = SDDP_DEFAULT_CONFIG();
+        //Customize your device presentation
+
+        config.device_type = "rootdevice";
+        config.uuid_root = "daa26fa3-d2d4-4072-bc7a";
+        ESP_LOGI(TAG, "Starting ssdp service");
         esp_err_t err = ssdp_start(&config);
         if (err!= ESP_OK) {
             ESP_LOGE(TAG, "Failed to start ssdp: %s", esp_err_to_name(err));

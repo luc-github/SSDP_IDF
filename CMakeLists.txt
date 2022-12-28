@@ -1,5 +1,5 @@
 set(srcs "ssdp.c")
-set(dependencies lwip console esp_netif)
+set(dependencies lwip console esp_netif esp_timer)
 
 idf_component_register(
     SRCS ${srcs}

@@ -33,10 +33,10 @@ typedef struct {
     uint8_t ttl;
     uint16_t port;
     uint32_t interval;
-    uint8_t max_reply_slots;
     uint16_t mx_max_delay;
     char * uuid_root;
     char * uuid;
+    char * schema_url;
     char * device_type;
     char * friendly_name;
     char * serial_number;
@@ -59,10 +59,10 @@ typedef struct {
         .port                = 80,                         \
         .ttl                 = 2,                          \
         .interval            = 1200,                       \
-        .max_reply_slots     = 5,                          \
         .mx_max_delay        = 10000,                      \
         .uuid_root           = NULL,                       \
         .uuid                =  NULL,                      \
+        .schema_url          = "description.xml",          \
         .device_type         = "Basic",                    \
         .friendly_name       = "ESP32",                    \
         .serial_number       = "000000",                   \
@@ -73,7 +73,7 @@ typedef struct {
         .model_url           = "https://www.espressif.com",\
         .model_number         = "12345",                   \
         .model_description    = NULL,                      \
-        .server_name          = "Espressif/1.0",           \
+        .server_name          = "SSDPServer-IDF/1.0",           \
         .services_description = NULL,                      \
         .icons_description    = NULL                       \
 }
