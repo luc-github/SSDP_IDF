@@ -56,8 +56,8 @@ typedef struct {
         .task_priority       = tskIDLE_PRIORITY+5,         \
         .stack_size          = 4096,                       \
         .core_id             = tskNO_AFFINITY,             \
-        .port                = 80,                         \
         .ttl                 = 2,                          \
+        .port                = 80,                         \
         .interval            = 1200,                       \
         .mx_max_delay        = 10000,                      \
         .uuid_root           = NULL,                       \
