@@ -30,15 +30,13 @@ static const char *TAG = "esp-ssdp";
 /*
 * Defines
 */
-#define SSDP_INTERVAL     1200
 #define SSDP_PORT         1900
 #define SSDP_METHOD_SIZE  10
 #define SSDP_URI_SIZE     2
 #define SSDP_BUFFER_SIZE  64
 #define SSDP_MULTICAST_TTL 2
-#define SSDP_UUID_ROOT "38323636-4558-4dda-9188"
+#define SSDP_UUID_ROOT "38323636-4558-4dda-9188-cda0e6"
 #define SSDP_MULTICAST_ADDR "239.255.255.250"
-#define SSDP_MAX_DELAY              10000
 
 /*
 * Sizes
@@ -124,7 +122,26 @@ typedef enum {
 */
 
 typedef struct {
-    ssdp_config_t * config;
+    //Configuration
+    uint8_t ttl;
+    uint16_t port;
+    uint32_t interval;
+    uint16_t mx_max_delay;
+    char * uuid;
+    char * schema_url;
+    char * device_type;
+    char * friendly_name;
+    char * serial_number;
+    char * presentation_url;
+    char * manufacturer_name;
+    char * manufacturer_url;
+    char * model_name;
+    char * model_url;
+    char * model_number;
+    char * model_description;
+    char * server_name;
+    char * services_description;
+    char * icons_description;
     //Task handle
     TaskHandle_t xHandle;
     //variables
@@ -132,10 +149,9 @@ typedef struct {
     char respond_type[SSDP_DEVICE_TYPE_SIZE+1];
     char usn_suffix[SSDP_USN_SUFFIX_SIZE+1];
     char * schema;
-    //TODO: Check usage now we use full datagram at once
     int delay;
-    uint64_t process_time;
     uint64_t  notify_time;
+
 } ssdp_task_config_t;
 
 /*
@@ -198,7 +214,7 @@ char * ssdp_get_LocalIP()
    multicast group */
 static int socket_add_ipv4_multicast_group(int sock, bool assign_source_if)
 {
-    if (!ssdp_task_config || !ssdp_task_config->config) {
+    if (!ssdp_task_config) {
         ESP_LOGE(TAG, "SSDP is not started.");
         return -1;
     }
@@ -244,7 +260,7 @@ err:
 
 static int create_multicast_ipv4_socket(void)
 {
-    if (!ssdp_task_config || !ssdp_task_config->config) {
+    if (!ssdp_task_config) {
         ESP_LOGE(TAG, "SSDP is not started.");
         return -1;
     }
@@ -270,7 +286,7 @@ static int create_multicast_ipv4_socket(void)
 
 
     // Assign multicast TTL (set separately from normal interface TTL)
-    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ssdp_task_config->config->ttl, sizeof(uint8_t));
+    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ssdp_task_config->ttl, sizeof(uint8_t));
     if (err < 0) {
         ESP_LOGE(TAG, "Failed to set IP_MULTICAST_TTL. Error %d", errno);
         goto err;
@@ -314,8 +330,8 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
     ssdp_method_t method = NONE;
     typedef enum {METHOD, URI, PROTO, KEY, VALUE, ABORT} states;
     states state = METHOD;
-    typedef enum {START, MAN, ST, MX} headers;
-    headers header = START;
+    typedef enum {STRIP, START,SKIP, MAN, ST, MX} headers;
+    headers header = STRIP;
     bool pending = false;
     bool stmatch = false;
     uint8_t cursor = 0;
@@ -374,7 +390,6 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
             if (cr == 4) {
                 if (stmatch) {
                     pending = true;
-                    ssdp_task_config->process_time = ssdp_millis();
                 }
             } else if (c == ':') {
                 cursor = 0;
@@ -389,6 +404,8 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
                 switch (header) {
                 case START:
                     ESP_LOGI(TAG,"***********************\n");
+                case SKIP:
+                case STRIP:
                     break;
                 case MAN:
                     ESP_LOGI(TAG,"MAN: %s\n", (char *)buffer);
@@ -409,34 +426,41 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
                         state = KEY;
                     } else {
                         // if the search type matches our type, we should respond instead of ABORT
-                        if(strcasecmp(buffer, ssdp_task_config->config->device_type) == 0) {
+                        if(strcasecmp(buffer, ssdp_task_config->device_type) == 0) {
                             stmatch = true;
                             // set USN suffix to the device type
                             strlcpy(ssdp_task_config->usn_suffix, "::", sizeof(ssdp_task_config->usn_suffix));
-                            strlcat(ssdp_task_config->usn_suffix, ssdp_task_config->config->device_type, sizeof(ssdp_task_config->usn_suffix));
+                            strlcat(ssdp_task_config->usn_suffix, ssdp_task_config->device_type, sizeof(ssdp_task_config->usn_suffix));
                             ESP_LOGI(TAG,"the search type matches our type %s\n");
                             state = KEY;
                         } else {
                             state = ABORT;
-                            ESP_LOGI(TAG,"REJECT. The search type %s does not match our type %s\n", buffer, ssdp_task_config->config->device_type);
+                            ESP_LOGI(TAG,"REJECT. The search type %s does not match our type %s\n", buffer, ssdp_task_config->device_type);
                             ESP_LOGI(TAG,"***********************\n");
                         }
                     }
                     break;
                 case MX:
                     ssdp_task_config->delay = ssdp_random(0, atoi(buffer)) * 1000L;
-                    if (ssdp_task_config->delay > SSDP_MAX_DELAY) {
-                        ssdp_task_config->delay = SSDP_MAX_DELAY;
+                    if (ssdp_task_config->delay >  ssdp_task_config->mx_max_delay) {
+                        ssdp_task_config->delay =  ssdp_task_config->mx_max_delay;
                     }
                     break;
                 }
 
                 if (state != ABORT) {
                     state = KEY;
-                    header = START;
+                    header = STRIP;
                     cursor = 0;
                 }
             } else if (c != '\r' && c != '\n') {
+                if(header == STRIP) {
+                    if(c == ' ') {
+                        break;
+                    } else {
+                        header = START;
+                    }
+                }
                 if (header == START) {
                     if (strncmp(buffer, "MA", 2) == 0) {
                         header = MAN;
@@ -444,6 +468,8 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
                         header = ST;
                     } else if (strcmp(buffer, "MX") == 0) {
                         header = MX;
+                    } else {
+                        header = SKIP;
                     }
                 }
 
@@ -461,13 +487,13 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
     }
 
 
-    if (pending && (ssdp_millis() - ssdp_task_config->process_time) > ssdp_task_config->delay) {
+    if (pending ) {
         pending = false;
         ssdp_task_config->delay = 0;
         ssdp_send(sock, NONE, remote_addr, remote_port);
-    } else if(ssdp_task_config->notify_time == 0 || (ssdp_millis() - ssdp_task_config->notify_time) > (ssdp_task_config->config->interval * 1000L)) {
-        ssdp_task_config->notify_time = ssdp_millis();
-        ssdp_send(sock, NOTIFY,remote_addr,remote_port);
+        ESP_LOGI(TAG, "SSDP: respond...\n");
+    } else {
+        ESP_LOGI(TAG, "SSDP: ignore...\n");
     }
 
 
@@ -476,16 +502,11 @@ static void onPacket(int sock, in_addr_t remote_addr, uint16_t remote_port, char
 
 void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t remote_port)
 {
+    int err = 0;
     if(method == NONE) {
         ESP_LOGI(TAG,"Sending Response to %s:%d", ip4addr_ntoa((const ip4_addr_t*)&remote_addr),remote_port);
 
     } else {
-        ip_addr_t tmpip ;
-        tmpip.type = IPADDR_TYPE_V4;
-        //convert string to ip_addr_t
-        ip4addr_aton(SSDP_MULTICAST_ADDR, &tmpip.u_addr.ip4);
-        remote_addr  =  ip4_addr_get_u32(&tmpip.u_addr.ip4);
-        remote_port = SSDP_PORT;
         // send notify with our root device type
         strlcpy(ssdp_task_config->respond_type, "upnp:rootdevice", sizeof(ssdp_task_config->respond_type));
         strlcpy(ssdp_task_config->usn_suffix, "::upnp:rootdevice", sizeof(ssdp_task_config->usn_suffix));
@@ -495,16 +516,16 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
     size_t msg_buffer_size = strlen(SSDP_PACKET_TEMPLATE)
                              + len_msg_template
                              + 5
-                             + (ssdp_task_config->config->server_name?strlen(ssdp_task_config->config->server_name):1)
-                             + (ssdp_task_config->config->model_name?strlen(ssdp_task_config->config->model_name):1)
-                             + (ssdp_task_config->config->model_number?strlen(ssdp_task_config->config->model_number):1)
+                             + (ssdp_task_config->server_name?strlen(ssdp_task_config->server_name):1)
+                             + (ssdp_task_config->model_name?strlen(ssdp_task_config->model_name):1)
+                             + (ssdp_task_config->model_number?strlen(ssdp_task_config->model_number):1)
                              + (SSDP_UUID_SIZE)
                              + (SSDP_USN_SUFFIX_SIZE)
                              + 2 // "NT" or "ST"
                              + (ssdp_task_config->respond_type?strlen(ssdp_task_config->respond_type):1)
                              + 16
                              + 5
-                             + (ssdp_task_config->config->schema_url?strlen(ssdp_task_config->config->schema_url):1);
+                             + (ssdp_task_config->schema_url?strlen(ssdp_task_config->schema_url):1);
     char * msg_buffer =  (char *)malloc(msg_buffer_size+1);
 
     if (!msg_buffer) {
@@ -516,17 +537,17 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
                           msg_buffer_size,
                           SSDP_PACKET_TEMPLATE,
                           ((method == NONE)?SSDP_RESPONSE_TEMPLATE:SSDP_NOTIFY_TEMPLATE),
-                          ssdp_task_config->config->interval,
-                          ssdp_task_config->config->server_name?ssdp_task_config->config->server_name:"",
-                          ssdp_task_config->config->model_name?ssdp_task_config->config->model_name:"",
-                          ssdp_task_config->config->model_number?ssdp_task_config->config->model_number:"",
-                          ssdp_task_config->config->uuid?ssdp_task_config->config->uuid:"",
+                          ssdp_task_config->interval,
+                          ssdp_task_config->server_name?ssdp_task_config->server_name:"",
+                          ssdp_task_config->model_name?ssdp_task_config->model_name:"",
+                          ssdp_task_config->model_number?ssdp_task_config->model_number:"",
+                          ssdp_task_config->uuid?ssdp_task_config->uuid:"",
                           ssdp_task_config->usn_suffix?ssdp_task_config->usn_suffix:"",
                           (method == NONE)?"ST":"NT",
                           ssdp_task_config->respond_type?ssdp_task_config->respond_type:"",
                           ssdp_get_LocalIP(),
-                          ssdp_task_config->config->port,
-                          ssdp_task_config->config->schema_url?ssdp_task_config->config->schema_url:""
+                          ssdp_task_config->port,
+                          ssdp_task_config->schema_url?ssdp_task_config->schema_url:""
                          );
     ESP_LOGI(TAG, "sprintf result: %d", result);
     if (result < 0) {
@@ -544,11 +565,17 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
     struct addrinfo *res;
 
     hints.ai_family = AF_INET; // For an IPv4 socket
-
-    int err = getaddrinfo(ip4addr_ntoa((const ip4_addr_t*)&remote_addr),
+    if(method == NONE) {
+        err = getaddrinfo(ip4addr_ntoa((const ip4_addr_t*)&remote_addr),
                           NULL,
                           &hints,
                           &res);
+    } else {
+        err = getaddrinfo(SSDP_MULTICAST_ADDR,
+                          NULL,
+                          &hints,
+                          &res);
+    }
     if (res == 0 ||err < 0) {
         if  (err < 0) {
             ESP_LOGE(TAG, "getaddrinfo() failed for IPV4 destination address. error: %d", err);
@@ -558,7 +585,11 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
         free(msg_buffer);
         return;
     }
-    ((struct sockaddr_in *)res->ai_addr)->sin_port = remote_port;
+    if(method == NONE) {
+        ((struct sockaddr_in *)res->ai_addr)->sin_port = remote_port;
+    } else {
+        ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(SSDP_PORT);
+    }
 
     ESP_LOGI(TAG, "Sending to IPV4 multicast address %s:%d...",  ip4addr_ntoa((const ip4_addr_t*)&remote_addr), remote_port);
 
@@ -577,7 +608,6 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
 void ssdp_running_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Starting ssdp_running_task");
-    bool notifyDone = false;
     while (1) {
         int sock;
         sock = create_multicast_ipv4_socket();
@@ -635,11 +665,11 @@ void ssdp_running_task(void *pvParameters)
                     }
 
                 }
-            } else {
-                if (!notifyDone) {
-                    notifyDone = true;
-                    ssdp_send(sock,NOTIFY,0,0);
-                }
+            }
+            if(ssdp_task_config->notify_time == 0 || (ssdp_millis() - ssdp_task_config->notify_time) > (ssdp_task_config->interval * 1000L)) {
+                ssdp_task_config->notify_time = ssdp_millis();
+                ESP_LOGI(TAG, "SSDP: notify...\n");
+                ssdp_send(sock, NOTIFY,0,0);
             }
         }
         ESP_LOGE(TAG, "Shutting down socket and restarting...");
@@ -687,14 +717,6 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
     }
     //Init to 0 everywhere
     memset(ssdp_task_config, 0, sizeof(ssdp_task_config_t));
-    //Create user configuration object
-    ssdp_task_config->config = (ssdp_config_t *)malloc(sizeof(ssdp_config_t));
-    if (!ssdp_task_config->config) {
-        ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
-        return ESP_ERR_NO_MEM;
-    }
-    //Init to 0 everywhere
-    memset(ssdp_task_config->config, 0, sizeof(ssdp_config_t));
 
     //Buffer for udp packet
     ssdp_task_config->datagram_buffer = (char *)malloc(SSDP_DATAGRAM_SIZE);
@@ -707,36 +729,37 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
     memset(ssdp_task_config->datagram_buffer, 0, SSDP_DATAGRAM_SIZE);
 
     //Task configuration
-    ssdp_task_config->config->task_priority = configuration->task_priority;
-    ssdp_task_config->config->stack_size = configuration->stack_size;
-    ssdp_task_config->config->core_id = configuration->core_id;
-    ssdp_task_config->config->port = configuration->port;
-    ssdp_task_config->config->ttl = configuration->ttl;
-    ssdp_task_config->config->interval = configuration->interval;
-    ssdp_task_config->config->mx_max_delay = configuration->mx_max_delay;
+    ssdp_task_config->port = configuration->port;
+    ssdp_task_config->ttl = configuration->ttl;
+    ssdp_task_config->interval = configuration->interval;
+    ssdp_task_config->mx_max_delay = configuration->mx_max_delay;
+    //Working variables
+    ssdp_task_config->delay = 0;
+    ssdp_task_config->respond_type[0] =0x0;
+    ssdp_task_config->notify_time = 0;
 
     //UUID
-    ssdp_task_config->config->uuid = (char *)malloc(SSDP_UUID_SIZE +1);
-    memset(ssdp_task_config->config->uuid, 0, SSDP_UUID_SIZE +1);
-    if (!ssdp_task_config->config->uuid) {
+    ssdp_task_config->uuid = (char *)malloc(SSDP_UUID_SIZE +1);
+    memset(ssdp_task_config->uuid, 0, SSDP_UUID_SIZE +1);
+    if (!ssdp_task_config->uuid) {
         ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
         return ESP_ERR_NO_MEM;
     }
     //Nothing is configured use default root and mac
     if ((!configuration->uuid_root || strlen(configuration->uuid_root)==0) && (!configuration->uuid || strlen(configuration->uuid)==0)) {
-        ssdp_set_UUID(&ssdp_task_config->config->uuid,SSDP_UUID_ROOT);
+        ssdp_set_UUID(&ssdp_task_config->uuid,SSDP_UUID_ROOT);
     } else {
         //if no full UID is configured but has root
         if ((!configuration->uuid || strlen(configuration->uuid)==0)) {
             if (strlen(configuration->uuid_root)==strlen(SSDP_UUID_ROOT)) {
-                ssdp_set_UUID(&ssdp_task_config->config->uuid,configuration->uuid_root);
+                ssdp_set_UUID(&ssdp_task_config->uuid,configuration->uuid_root);
             } else {
                 ESP_LOGE(TAG, "Wrong size of uuid root parameter");
                 return ESP_ERR_INVALID_ARG;
             }
         } else {
             if (strlen(configuration->uuid)==SSDP_UUID_SIZE) {
-                strcpy(ssdp_task_config->config->uuid, configuration->uuid);
+                strcpy(ssdp_task_config->uuid, configuration->uuid);
             } else {
                 ESP_LOGE(TAG, "Invalid uuid parameter");
                 return ESP_ERR_INVALID_ARG;
@@ -750,12 +773,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "schema_url too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->schema_url = (char *) malloc(strlen(configuration->schema_url)+1);
-        if (!ssdp_task_config->config->schema_url ) {
+        ssdp_task_config->schema_url = (char *) malloc(strlen(configuration->schema_url)+1);
+        if (!ssdp_task_config->schema_url ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->schema_url, configuration->schema_url);
+        strcpy(ssdp_task_config->schema_url, configuration->schema_url);
     }
 
     //Device type
@@ -764,12 +787,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Device type too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->device_type = (char *) malloc(strlen(configuration->device_type)+1);
-        if (!ssdp_task_config->config->device_type ) {
+        ssdp_task_config->device_type = (char *) malloc(strlen(configuration->device_type)+1);
+        if (!ssdp_task_config->device_type ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->device_type, configuration->device_type);
+        strcpy(ssdp_task_config->device_type, configuration->device_type);
     }
 
 
@@ -779,13 +802,13 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Friendly name too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->friendly_name = (char *) malloc(strlen(configuration->friendly_name)+1);
-        if (!ssdp_task_config->config->friendly_name ) {
+        ssdp_task_config->friendly_name = (char *) malloc(strlen(configuration->friendly_name)+1);
+        if (!ssdp_task_config->friendly_name ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
     }
-    strcpy(ssdp_task_config->config->friendly_name, configuration->friendly_name);
+    strcpy(ssdp_task_config->friendly_name, configuration->friendly_name);
 
     //Serial Number
     if(configuration->serial_number) {
@@ -793,12 +816,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Serial number too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->serial_number = (char *) malloc(strlen(configuration->serial_number)+1);
-        if (!ssdp_task_config->config->serial_number ) {
+        ssdp_task_config->serial_number = (char *) malloc(strlen(configuration->serial_number)+1);
+        if (!ssdp_task_config->serial_number ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->serial_number, configuration->serial_number);
+        strcpy(ssdp_task_config->serial_number, configuration->serial_number);
     }
 
     //Presentation url
@@ -807,12 +830,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Presentation url too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->presentation_url = (char *) malloc(strlen(configuration->presentation_url)+1);
-        if (!ssdp_task_config->config->presentation_url ) {
+        ssdp_task_config->presentation_url = (char *) malloc(strlen(configuration->presentation_url)+1);
+        if (!ssdp_task_config->presentation_url ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->presentation_url, configuration->presentation_url);
+        strcpy(ssdp_task_config->presentation_url, configuration->presentation_url);
     }
 
     //Manufacturer name
@@ -821,12 +844,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Manufacturer name too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->manufacturer_name = (char *) malloc(strlen(configuration->manufacturer_name)+1);
-        if (!ssdp_task_config->config->manufacturer_name ) {
+        ssdp_task_config->manufacturer_name = (char *) malloc(strlen(configuration->manufacturer_name)+1);
+        if (!ssdp_task_config->manufacturer_name ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->manufacturer_name, configuration->manufacturer_name);
+        strcpy(ssdp_task_config->manufacturer_name, configuration->manufacturer_name);
     }
 
     //Manufacturer url
@@ -835,12 +858,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Manufacturer url too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->manufacturer_url = (char *) malloc(strlen(configuration->manufacturer_url)+1);
-        if (!ssdp_task_config->config->manufacturer_url ) {
+        ssdp_task_config->manufacturer_url = (char *) malloc(strlen(configuration->manufacturer_url)+1);
+        if (!ssdp_task_config->manufacturer_url ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->manufacturer_url, configuration->manufacturer_url);
+        strcpy(ssdp_task_config->manufacturer_url, configuration->manufacturer_url);
     }
 
     //Model name
@@ -849,12 +872,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Model name too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->model_name = (char *) malloc(strlen(configuration->model_name)+1);
-        if (!ssdp_task_config->config->model_name ) {
+        ssdp_task_config->model_name = (char *) malloc(strlen(configuration->model_name)+1);
+        if (!ssdp_task_config->model_name ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->model_name, configuration->model_name);
+        strcpy(ssdp_task_config->model_name, configuration->model_name);
     }
 
     //Model url
@@ -863,12 +886,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Model url too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->model_url = (char *) malloc(strlen(configuration->model_url)+1);
-        if (!ssdp_task_config->config->model_url ) {
+        ssdp_task_config->model_url = (char *) malloc(strlen(configuration->model_url)+1);
+        if (!ssdp_task_config->model_url ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->model_url, configuration->model_url);
+        strcpy(ssdp_task_config->model_url, configuration->model_url);
     }
 
     //Model number
@@ -877,12 +900,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Model number too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->model_number = (char *) malloc(strlen(configuration->model_number)+1);
-        if (!ssdp_task_config->config->model_number ) {
+        ssdp_task_config->model_number = (char *) malloc(strlen(configuration->model_number)+1);
+        if (!ssdp_task_config->model_number ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->model_number, configuration->model_number);
+        strcpy(ssdp_task_config->model_number, configuration->model_number);
     }
 
     //Model description
@@ -891,12 +914,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Model description too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->model_description = (char *) malloc(strlen(configuration->model_description)+1);
-        if (!ssdp_task_config->config->model_description ) {
+        ssdp_task_config->model_description = (char *) malloc(strlen(configuration->model_description)+1);
+        if (!ssdp_task_config->model_description ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->model_description, configuration->model_description);
+        strcpy(ssdp_task_config->model_description, configuration->model_description);
     }
     //Server name
     if (configuration->server_name) {
@@ -904,12 +927,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Server name too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->server_name = (char *) malloc(strlen(configuration->server_name)+1);
-        if (!ssdp_task_config->config->server_name ) {
+        ssdp_task_config->server_name = (char *) malloc(strlen(configuration->server_name)+1);
+        if (!ssdp_task_config->server_name ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->server_name, configuration->server_name);
+        strcpy(ssdp_task_config->server_name, configuration->server_name);
     }
     //Services description
     if(configuration->services_description) {
@@ -917,12 +940,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Services description too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->services_description = (char *) malloc(strlen(configuration->services_description)+1);
-        if (!ssdp_task_config->config->services_description ) {
+        ssdp_task_config->services_description = (char *) malloc(strlen(configuration->services_description)+1);
+        if (!ssdp_task_config->services_description ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->services_description, configuration->services_description);
+        strcpy(ssdp_task_config->services_description, configuration->services_description);
     }
 
     //Icons description
@@ -931,12 +954,12 @@ esp_err_t ssdp_start(ssdp_config_t* configuration)
             ESP_LOGE(TAG, "Icons description too long");
             return ESP_ERR_INVALID_ARG;
         }
-        ssdp_task_config->config->icons_description = (char *) malloc(strlen(configuration->icons_description)+1);
-        if (!ssdp_task_config->config->icons_description ) {
+        ssdp_task_config->icons_description = (char *) malloc(strlen(configuration->icons_description)+1);
+        if (!ssdp_task_config->icons_description ) {
             ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
             return ESP_ERR_NO_MEM;
         }
-        strcpy(ssdp_task_config->config->icons_description, configuration->icons_description);
+        strcpy(ssdp_task_config->icons_description, configuration->icons_description);
     }
 
     ESP_LOGI(TAG, "Task creation core %d, stack:  %d, priotity %d",configuration->core_id,configuration->stack_size,configuration->task_priority );
@@ -961,22 +984,19 @@ esp_err_t ssdp_stop()
             ssdp_task_config->xHandle = NULL;
         }
         //Free memory
-        if (ssdp_task_config->config) {
-            free(ssdp_task_config->config->device_type);
-            free(ssdp_task_config->config->friendly_name);
-            free(ssdp_task_config->config->serial_number);
-            free(ssdp_task_config->config->presentation_url);
-            free(ssdp_task_config->config->manufacturer_name);
-            free(ssdp_task_config->config->manufacturer_url);
-            free(ssdp_task_config->config->model_name );
-            free(ssdp_task_config->config->model_url);
-            free(ssdp_task_config->config->model_number);
-            free(ssdp_task_config->config->model_description);
-            free(ssdp_task_config->config->server_name );
-            free(ssdp_task_config->config->services_description);
-            free(ssdp_task_config->config->icons_description);
-            free(ssdp_task_config->config);
-        }
+        free(ssdp_task_config->device_type);
+        free(ssdp_task_config->friendly_name);
+        free(ssdp_task_config->serial_number);
+        free(ssdp_task_config->presentation_url);
+        free(ssdp_task_config->manufacturer_name);
+        free(ssdp_task_config->manufacturer_url);
+        free(ssdp_task_config->model_name );
+        free(ssdp_task_config->model_url);
+        free(ssdp_task_config->model_number);
+        free(ssdp_task_config->model_description);
+        free(ssdp_task_config->server_name );
+        free(ssdp_task_config->services_description);
+        free(ssdp_task_config->icons_description);
         free(ssdp_task_config->datagram_buffer);
         free(ssdp_task_config->schema);
         free(ssdp_task_config);
@@ -999,37 +1019,37 @@ const char* get_ssdp_schema_str()
     size_t template_size = sizeof(SSDP_SCHEMA_TEMPLATE)
                            + 15 //IP
                            + 5  //port
-                           + (ssdp_task_config->config->device_type?strlen(ssdp_task_config->config->device_type):1)
-                           + (ssdp_task_config->config->friendly_name?strlen(ssdp_task_config->config->friendly_name):1)
-                           + (ssdp_task_config->config->presentation_url?strlen(ssdp_task_config->config->presentation_url):1)
-                           + (ssdp_task_config->config->serial_number?strlen(ssdp_task_config->config->serial_number):1)
-                           + (ssdp_task_config->config->model_name?strlen(ssdp_task_config->config->model_name):1)
-                           + (ssdp_task_config->config->model_description?strlen(ssdp_task_config->config->model_description):1)
-                           + (ssdp_task_config->config->model_number?strlen(ssdp_task_config->config->model_number):1)
-                           + (ssdp_task_config->config->model_url?strlen(ssdp_task_config->config->model_url):1)
-                           + (ssdp_task_config->config->manufacturer_name?strlen(ssdp_task_config->config->manufacturer_name):1)
-                           + (ssdp_task_config->config->manufacturer_url?strlen(ssdp_task_config->config->manufacturer_url):1)
-                           + (ssdp_task_config->config->uuid?strlen(ssdp_task_config->config->uuid):1)
-                           + (ssdp_task_config->config->services_description?strlen(ssdp_task_config->config->services_description):1)
-                           + (ssdp_task_config->config->icons_description?strlen(ssdp_task_config->config->icons_description):1) ;
+                           + (ssdp_task_config->device_type?strlen(ssdp_task_config->device_type):1)
+                           + (ssdp_task_config->friendly_name?strlen(ssdp_task_config->friendly_name):1)
+                           + (ssdp_task_config->presentation_url?strlen(ssdp_task_config->presentation_url):1)
+                           + (ssdp_task_config->serial_number?strlen(ssdp_task_config->serial_number):1)
+                           + (ssdp_task_config->model_name?strlen(ssdp_task_config->model_name):1)
+                           + (ssdp_task_config->model_description?strlen(ssdp_task_config->model_description):1)
+                           + (ssdp_task_config->model_number?strlen(ssdp_task_config->model_number):1)
+                           + (ssdp_task_config->model_url?strlen(ssdp_task_config->model_url):1)
+                           + (ssdp_task_config->manufacturer_name?strlen(ssdp_task_config->manufacturer_name):1)
+                           + (ssdp_task_config->manufacturer_url?strlen(ssdp_task_config->manufacturer_url):1)
+                           + (ssdp_task_config->uuid?strlen(ssdp_task_config->uuid):1)
+                           + (ssdp_task_config->services_description?strlen(ssdp_task_config->services_description):1)
+                           + (ssdp_task_config->icons_description?strlen(ssdp_task_config->icons_description):1) ;
 
     ssdp_task_config->schema = (char *) malloc(template_size+1);
     if (ssdp_task_config->schema) {
         if ( sprintf(ssdp_task_config->schema,SSDP_SCHEMA_TEMPLATE,ssdp_get_LocalIP(),
-                     ssdp_task_config->config->port,
-                     ssdp_task_config->config->device_type?ssdp_task_config->config->device_type:"",
-                     ssdp_task_config->config->friendly_name?ssdp_task_config->config->friendly_name:"",
-                     ssdp_task_config->config->presentation_url?ssdp_task_config->config->presentation_url:"",
-                     ssdp_task_config->config->serial_number?ssdp_task_config->config->serial_number:"",
-                     ssdp_task_config->config->model_name?ssdp_task_config->config->model_name:"",
-                     ssdp_task_config->config->model_description?ssdp_task_config->config->model_description:"",
-                     ssdp_task_config->config->model_number?ssdp_task_config->config->model_number:"",
-                     ssdp_task_config->config->model_url?ssdp_task_config->config->model_url:"",
-                     ssdp_task_config->config->manufacturer_name?ssdp_task_config->config->manufacturer_name:"",
-                     ssdp_task_config->config->manufacturer_url?ssdp_task_config->config->manufacturer_url:"",
-                     ssdp_task_config->config->uuid?ssdp_task_config->config->uuid:"",
-                     ssdp_task_config->config->services_description?ssdp_task_config->config->services_description:"",
-                     ssdp_task_config->config->icons_description?ssdp_task_config->config->icons_description:"")<0) {
+                     ssdp_task_config->port,
+                     ssdp_task_config->device_type?ssdp_task_config->device_type:"",
+                     ssdp_task_config->friendly_name?ssdp_task_config->friendly_name:"",
+                     ssdp_task_config->presentation_url?ssdp_task_config->presentation_url:"",
+                     ssdp_task_config->serial_number?ssdp_task_config->serial_number:"",
+                     ssdp_task_config->model_name?ssdp_task_config->model_name:"",
+                     ssdp_task_config->model_description?ssdp_task_config->model_description:"",
+                     ssdp_task_config->model_number?ssdp_task_config->model_number:"",
+                     ssdp_task_config->model_url?ssdp_task_config->model_url:"",
+                     ssdp_task_config->manufacturer_name?ssdp_task_config->manufacturer_name:"",
+                     ssdp_task_config->manufacturer_url?ssdp_task_config->manufacturer_url:"",
+                     ssdp_task_config->uuid?ssdp_task_config->uuid:"",
+                     ssdp_task_config->services_description?ssdp_task_config->services_description:"",
+                     ssdp_task_config->icons_description?ssdp_task_config->icons_description:"")<0) {
             ESP_LOGE(TAG, "sprintf error for schema");
             free(ssdp_task_config->schema);
             ssdp_task_config->schema = NULL;

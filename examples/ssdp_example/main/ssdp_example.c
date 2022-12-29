@@ -96,7 +96,7 @@ static httpd_handle_t start_webserver(void)
         //Customize your device presentation
 
         config.device_type = "rootdevice";
-        config.uuid_root = "daa26fa3-d2d4-4072-bc7a";
+        config.uuid_root = "38323636-4558-4dda-9188-cda0e6";
         ESP_LOGI(TAG, "Starting ssdp service");
         esp_err_t err = ssdp_start(&config);
         if (err!= ESP_OK) {

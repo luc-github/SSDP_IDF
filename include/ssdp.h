@@ -34,22 +34,22 @@ typedef struct {
     uint16_t port;
     uint32_t interval;
     uint16_t mx_max_delay;
-    char * uuid_root;
-    char * uuid;
-    char * schema_url;
-    char * device_type;
-    char * friendly_name;
-    char * serial_number;
-    char * presentation_url;
-    char * manufacturer_name;
-    char * manufacturer_url;
-    char * model_name;
-    char * model_url;
-    char * model_number;
-    char * model_description;
-    char * server_name;
-    char * services_description;
-    char * icons_description;
+    const char * uuid_root;
+    const char * uuid;
+    const char * schema_url;
+    const char * device_type;
+    const char * friendly_name;
+    const char * serial_number;
+    const char * presentation_url;
+    const char * manufacturer_name;
+    const char * manufacturer_url;
+    const char * model_name;
+    const char * model_url;
+    const char * model_number;
+    const char * model_description;
+    const char * server_name;
+    const char * services_description;
+    const char * icons_description;
 } ssdp_config_t;
 
 #define SDDP_DEFAULT_CONFIG() {                            \
@@ -73,7 +73,7 @@ typedef struct {
         .model_url           = "https://www.espressif.com",\
         .model_number         = "12345",                   \
         .model_description    = NULL,                      \
-        .server_name          = "SSDPServer-IDF/1.0",           \
+        .server_name          = "SSDPServer/1.0",           \
         .services_description = NULL,                      \
         .icons_description    = NULL                       \
 }
