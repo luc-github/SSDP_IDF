@@ -1,2 +1,2 @@
-# SSDP component for IDF (ESP32 Simple Service Discovery) 
+# ESP32 Simple Service Discovery IDF component
 SSDP idf component based on https://github.com/luc-github/ESP32SSDP
