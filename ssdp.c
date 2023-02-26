@@ -522,7 +522,7 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
                              + (SSDP_UUID_SIZE)
                              + (SSDP_USN_SUFFIX_SIZE)
                              + 2 // "NT" or "ST"
-                             + (ssdp_task_config->respond_type?strlen(ssdp_task_config->respond_type):1)
+                             + strlen(ssdp_task_config->respond_type)
                              + 16
                              + 5
                              + (ssdp_task_config->schema_url?strlen(ssdp_task_config->schema_url):1);
@@ -544,7 +544,7 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
                           ssdp_task_config->uuid?ssdp_task_config->uuid:"",
                           ssdp_task_config->usn_suffix?ssdp_task_config->usn_suffix:"",
                           (method == NONE)?"ST":"NT",
-                          ssdp_task_config->respond_type?ssdp_task_config->respond_type:"",
+                          ssdp_task_config->respond_type,
                           ssdp_get_LocalIP(),
                           ssdp_task_config->port,
                           ssdp_task_config->schema_url?ssdp_task_config->schema_url:""
