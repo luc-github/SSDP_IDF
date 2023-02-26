@@ -542,7 +542,7 @@ void ssdp_send (int sock, ssdp_method_t method,  in_addr_t remote_addr, uint16_t
                           ssdp_task_config->model_name?ssdp_task_config->model_name:"",
                           ssdp_task_config->model_number?ssdp_task_config->model_number:"",
                           ssdp_task_config->uuid?ssdp_task_config->uuid:"",
-                          ssdp_task_config->usn_suffix?ssdp_task_config->usn_suffix:"",
+                          ssdp_task_config->usn_suffix,
                           (method == NONE)?"ST":"NT",
                           ssdp_task_config->respond_type,
                           ssdp_get_LocalIP(),
