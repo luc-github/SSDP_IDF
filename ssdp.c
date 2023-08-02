@@ -669,12 +669,14 @@ void ssdp_running_task(void *pvParameters) {
           }
         }
       }
-      if (ssdp_task_config->notify_time == 0 ||
-          (ssdp_millis() - ssdp_task_config->notify_time) >
-              (ssdp_task_config->interval * 1000L)) {
-        ssdp_task_config->notify_time = ssdp_millis();
-        ESP_LOGI(TAG, "SSDP: notify...\n");
-        ssdp_send(multicast_socket, NOTIFY, 0, 0);
+      if (ssdp_task_config){
+        if ((ssdp_task_config->notify_time == 0) ||
+            (ssdp_millis() - ssdp_task_config->notify_time) >
+                (ssdp_task_config->interval * 1000L)) {
+          ssdp_task_config->notify_time = ssdp_millis();
+          ESP_LOGI(TAG, "SSDP: notify...\n");
+          ssdp_send(multicast_socket, NOTIFY, 0, 0);
+        }
       }
     }
     ESP_LOGE(TAG, "Shutting down socket and restarting...");
