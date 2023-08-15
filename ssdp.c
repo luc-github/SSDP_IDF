@@ -532,7 +532,7 @@ void ssdp_send(int sock, ssdp_method_t method, in_addr_t remote_addr,
       (SSDP_UUID_SIZE) + (SSDP_USN_SUFFIX_SIZE) + 2  // "NT" or "ST"
       + strlen(ssdp_task_config->respond_type) + 16 + 5 +
       (ssdp_task_config->schema_url ? strlen(ssdp_task_config->schema_url) : 1);
-  char *msg_buffer = (char *)malloc(msg_buffer_size + 1);
+  char *msg_buffer = (char *)calloc(msg_buffer_size + 1, sizeof(char));
 
   if (!msg_buffer) {
     ESP_LOGE(TAG, "Error not enough memory for valueBuffer creation");
@@ -669,7 +669,7 @@ void ssdp_running_task(void *pvParameters) {
           }
         }
       }
-      if (ssdp_task_config){
+      if (ssdp_task_config) {
         if ((ssdp_task_config->notify_time == 0) ||
             (ssdp_millis() - ssdp_task_config->notify_time) >
                 (ssdp_task_config->interval * 1000L)) {
@@ -713,24 +713,20 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
     return ESP_ERR_INVALID_STATE;
   }
   // Create task configuration workplace
-  ssdp_task_config = (ssdp_task_config_t *)malloc(sizeof(ssdp_task_config_t));
+  ssdp_task_config =
+      (ssdp_task_config_t *)calloc(1, sizeof(ssdp_task_config_t));
   if (!ssdp_task_config) {
     ESP_LOGE(TAG, "No enough memory for ssdp task configuration");
     return ESP_ERR_NO_MEM;
   }
 
-  // Init to 0 everywhere
-  memset(ssdp_task_config, 0, sizeof(ssdp_task_config_t));
-
   // Buffer for udp packet
-  ssdp_task_config->datagram_buffer = (char *)malloc(SSDP_DATAGRAM_SIZE);
+  ssdp_task_config->datagram_buffer =
+      (char *)calloc(SSDP_DATAGRAM_SIZE, sizeof(uint8_t));
   if (!ssdp_task_config->datagram_buffer) {
     ESP_LOGE(TAG, "No enough memory for ssdp datagram buffer");
     return ESP_ERR_NO_MEM;
   }
-
-  // Init to 0 everywhere
-  memset(ssdp_task_config->datagram_buffer, 0, SSDP_DATAGRAM_SIZE);
 
   // Task configuration
   ssdp_task_config->port = configuration->port;
@@ -743,8 +739,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
   ssdp_task_config->notify_time = 0;
 
   // UUID
-  ssdp_task_config->uuid = (char *)malloc(SSDP_UUID_SIZE + 1);
-  memset(ssdp_task_config->uuid, 0, SSDP_UUID_SIZE + 1);
+  ssdp_task_config->uuid = (char *)calloc(SSDP_UUID_SIZE + 1, sizeof(char));
+
   if (!ssdp_task_config->uuid) {
     ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
     return ESP_ERR_NO_MEM;
@@ -779,7 +775,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->schema_url =
-        (char *)malloc(strlen(configuration->schema_url) + 1);
+        (char *)calloc(strlen(configuration->schema_url) + 1, sizeof(char));
     if (!ssdp_task_config->schema_url) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -794,7 +790,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->device_type =
-        (char *)malloc(strlen(configuration->device_type) + 1);
+        (char *)calloc(strlen(configuration->device_type) + 1, sizeof(char));
     if (!ssdp_task_config->device_type) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -809,7 +805,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->friendly_name =
-        (char *)malloc(strlen(configuration->friendly_name) + 1);
+        (char *)calloc(strlen(configuration->friendly_name) + 1, sizeof(char));
     if (!ssdp_task_config->friendly_name) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -824,7 +820,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->serial_number =
-        (char *)malloc(strlen(configuration->serial_number) + 1);
+        (char *)calloc(strlen(configuration->serial_number) + 1, sizeof(char));
     if (!ssdp_task_config->serial_number) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -838,8 +834,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       ESP_LOGE(TAG, "Presentation url too long");
       return ESP_ERR_INVALID_ARG;
     }
-    ssdp_task_config->presentation_url =
-        (char *)malloc(strlen(configuration->presentation_url) + 1);
+    ssdp_task_config->presentation_url = (char *)calloc(
+        strlen(configuration->presentation_url) + 1, sizeof(char));
     if (!ssdp_task_config->presentation_url) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -854,8 +850,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       ESP_LOGE(TAG, "Manufacturer name too long");
       return ESP_ERR_INVALID_ARG;
     }
-    ssdp_task_config->manufacturer_name =
-        (char *)malloc(strlen(configuration->manufacturer_name) + 1);
+    ssdp_task_config->manufacturer_name = (char *)calloc(
+        strlen(configuration->manufacturer_name) + 1, sizeof(char));
     if (!ssdp_task_config->manufacturer_name) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -870,8 +866,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       ESP_LOGE(TAG, "Manufacturer url too long");
       return ESP_ERR_INVALID_ARG;
     }
-    ssdp_task_config->manufacturer_url =
-        (char *)malloc(strlen(configuration->manufacturer_url) + 1);
+    ssdp_task_config->manufacturer_url = (char *)calloc(
+        strlen(configuration->manufacturer_url) + 1, sizeof(char));
     if (!ssdp_task_config->manufacturer_url) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -886,7 +882,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->model_name =
-        (char *)malloc(strlen(configuration->model_name) + 1);
+        (char *)calloc(strlen(configuration->model_name) + 1, sizeof(char));
     if (!ssdp_task_config->model_name) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -901,7 +897,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->model_url =
-        (char *)malloc(strlen(configuration->model_url) + 1);
+        (char *)calloc(strlen(configuration->model_url) + 1, sizeof(char));
     if (!ssdp_task_config->model_url) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -916,7 +912,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->model_number =
-        (char *)malloc(strlen(configuration->model_number) + 1);
+        (char *)calloc(strlen(configuration->model_number) + 1, sizeof(char));
     if (!ssdp_task_config->model_number) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -931,8 +927,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       ESP_LOGE(TAG, "Model description too long");
       return ESP_ERR_INVALID_ARG;
     }
-    ssdp_task_config->model_description =
-        (char *)malloc(strlen(configuration->model_description) + 1);
+    ssdp_task_config->model_description = (char *)calloc(
+        strlen(configuration->model_description) + 1, sizeof(char));
     if (!ssdp_task_config->model_description) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -947,7 +943,7 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       return ESP_ERR_INVALID_ARG;
     }
     ssdp_task_config->server_name =
-        (char *)malloc(strlen(configuration->server_name) + 1);
+        (char *)calloc(strlen(configuration->server_name) + 1, sizeof(char));
     if (!ssdp_task_config->server_name) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -961,8 +957,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       ESP_LOGE(TAG, "Services description too long");
       return ESP_ERR_INVALID_ARG;
     }
-    ssdp_task_config->services_description =
-        (char *)malloc(strlen(configuration->services_description) + 1);
+    ssdp_task_config->services_description = (char *)calloc(
+        strlen(configuration->services_description) + 1, sizeof(char));
     if (!ssdp_task_config->services_description) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -978,8 +974,8 @@ esp_err_t ssdp_start(ssdp_config_t *configuration) {
       ESP_LOGE(TAG, "Icons description too long");
       return ESP_ERR_INVALID_ARG;
     }
-    ssdp_task_config->icons_description =
-        (char *)malloc(strlen(configuration->icons_description) + 1);
+    ssdp_task_config->icons_description = (char *)calloc(
+        strlen(configuration->icons_description) + 1, sizeof(char));
     if (!ssdp_task_config->icons_description) {
       ESP_LOGE(TAG, "No enough memory for ssdp user task configuration");
       return ESP_ERR_NO_MEM;
@@ -1095,7 +1091,7 @@ const char *get_ssdp_schema_str() {
            ? strlen(ssdp_task_config->icons_description)
            : 1);
 
-  ssdp_task_config->schema = (char *)malloc(template_size + 1);
+  ssdp_task_config->schema = (char *)calloc(template_size + 1, sizeof(char));
   if (ssdp_task_config->schema) {
     if (sprintf(
             ssdp_task_config->schema, SSDP_SCHEMA_TEMPLATE, ssdp_get_LocalIP(),
