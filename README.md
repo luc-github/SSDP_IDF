@@ -1,4 +1,5 @@
-# ESP32 Simple Service Discovery IDF component
+# ESP32 Simple Service Discovery IDF component ![SSDP_IDF](https://img.shields.io/badge/dynamic/json?label=Version&query=$.version&url=https://raw.githubusercontent.com/luc-github/SSDP_IDF/refs/heads/main/info.json)
+
 SSDP idf component based on https://github.com/luc-github/ESP32SSDP
 
 > [!WARNING]
